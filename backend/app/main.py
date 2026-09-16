@@ -1,15 +1,18 @@
+from . import models
+from .database import Base, engine
 from fastapi import FastAPI
 from sqlalchemy import text
 
 from .database import engine
 
 
+Base.metadata.create_all(bind=engine)
+
 app = FastAPI(
     title="CampusLeave AI",
     description="AI-powered College Leave Management System",
     version="1.0.0",
 )
-
 
 @app.get("/")
 def root():
