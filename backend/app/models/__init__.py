@@ -6,6 +6,9 @@ from .leave_type import LeaveType
 from .leave_request import LeaveRequest
 from .attendance_record import AttendanceRecord
 from .approval_history import ApprovalHistory
+from .ai_analysis import AIAnalysis
+from .notification import Notification
+from .audit_log import AuditLog
 
 __all__ = [
     "Department",
@@ -16,4 +19,7 @@ __all__ = [
     "LeaveRequest",
     "AttendanceRecord",
     "ApprovalHistory",
+    "AIAnalysis",
+    "Notification",
+    "AuditLog",
 ]

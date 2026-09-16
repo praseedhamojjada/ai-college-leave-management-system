@@ -103,3 +103,7 @@ class LeaveRequest(Base):
         "ApprovalHistory",
         back_populates="leave_request"
     )
+    ai_analyses = relationship(
+        "AIAnalysis",
+        back_populates="leave_request"
+    )
