@@ -6,6 +6,7 @@ from sqlalchemy import text
 from .database import engine
 from .routers.auth import router as auth_router
 from .routers.leaves import router as leaves_router
+from .routers.dashboard import router as dashboard_router
 
 Base.metadata.create_all(bind=engine)
 
@@ -15,6 +16,7 @@ app = FastAPI(
     version="1.0.0",
 )
 app.include_router(auth_router)
+app.include_router(dashboard_router)
 app.include_router(leaves_router)
 
 
