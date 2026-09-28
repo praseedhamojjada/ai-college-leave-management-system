@@ -4,7 +4,8 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from .database import engine
-
+from .routers.auth import router as auth_router
+from .routers.leaves import router as leaves_router
 
 Base.metadata.create_all(bind=engine)
 
@@ -13,6 +14,9 @@ app = FastAPI(
     description="AI-powered College Leave Management System",
     version="1.0.0",
 )
+app.include_router(auth_router)
+app.include_router(leaves_router)
+
 
 @app.get("/")
 def root():
