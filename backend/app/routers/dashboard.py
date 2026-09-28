@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.roles import require_role
 from backend.app.database import get_db
+from backend.app.services.attendance_service import get_student_attendance_summary
 from backend.app.models import (
     AIAnalysis,
     AuditLog,
@@ -36,6 +37,16 @@ def get_student_dashboard(
         return {
             "error": "Student profile not found"
         }
+
+    # Attendance records are the single source of truth.
+    # Do not use StudentProfile.total_attendance here because that
+    # field may be a stale cached value.
+    attendance_summary = get_student_attendance_summary(
+        db,
+        student.student_id,
+    )
+
+    current_attendance = attendance_summary["attendance_percentage"]
 
     # Get all leave requests
     leaves = (
@@ -126,7 +137,10 @@ def get_student_dashboard(
             "section": student.section,
             "batch": student.batch,
             "current_cgpa": student.current_cgpa,
-            "total_attendance": student.total_attendance,
+            "total_attendance": current_attendance,
+            "classes_held": attendance_summary["classes_held"],
+            "classes_attended": attendance_summary["classes_attended"],
+            "classes_absent": attendance_summary["classes_absent"],
         },
         "leave_summary": {
             "total": total_leaves,
@@ -345,12 +359,25 @@ def get_management_dashboard(
         .all()
     )
 
-    if students:
+    # Attendance records are the single source of truth for
+    # management analytics as well.
+    student_attendance = [
+        (
+            student,
+            get_student_attendance_summary(
+                db,
+                student.student_id,
+            )["attendance_percentage"],
+        )
+        for student in students
+    ]
+
+    if student_attendance:
         average_attendance = round(
             sum(
-                student.total_attendance
-                for student in students
-            ) / len(students),
+                attendance
+                for _, attendance in student_attendance
+            ) / len(student_attendance),
             2,
         )
     else:
@@ -360,10 +387,10 @@ def get_management_dashboard(
         {
             "student_id": student.student_id,
             "user_id": student.user_id,
-            "attendance": student.total_attendance,
+            "attendance": attendance,
         }
-        for student in students
-        if student.total_attendance < 75
+        for student, attendance in student_attendance
+        if attendance < 75
     ]
 
     # ---------------------------------------------------------

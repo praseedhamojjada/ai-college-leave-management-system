@@ -19,12 +19,48 @@ from backend.app.schemas.leave import (
     LeaveResponse,
     MyLeaveResponse,
 )
-
+from backend.app.models import AIAnalysis
+from backend.app.services.ai_leave_analyzer import analyze_leave
+from backend.app.services.attendance_service import (
+    get_student_attendance_summary,
+    calculate_projected_attendance,
+)
 
 router = APIRouter(
     prefix="/api/leaves",
     tags=["Leaves"],
 )
+
+
+# ============================================================
+# GET ACTIVE LEAVE TYPES
+# IMPORTANT: THIS MUST COME BEFORE /{leave_id}
+# ============================================================
+
+@router.get(
+    "/types",
+)
+def get_leave_types(
+    current_user: User = Depends(require_role("STUDENT")),
+    db: Session = Depends(get_db),
+):
+    leave_types = (
+        db.query(LeaveType)
+        .filter(LeaveType.is_active.is_(True))
+        .order_by(LeaveType.leave_type_id.asc())
+        .all()
+    )
+
+    return [
+        {
+            "leave_type_id": leave_type.leave_type_id,
+            "type_name": leave_type.type_name,
+            "description": leave_type.description,
+            "max_days": leave_type.max_days_per_request,
+            "requires_document": leave_type.requires_document,
+        }
+        for leave_type in leave_types
+    ]
 
 
 # ============================================================
@@ -116,15 +152,21 @@ def create_leave(
             ),
         )
 
-    # 7. Get current attendance
-    attendance_before = student.total_attendance
+    # 7. Get current attendance from attendance_records
+    # Attendance records are the single source of truth.
+    attendance_summary = get_student_attendance_summary(
+        db,
+        student.student_id,
+    )
 
-    # 8. Calculate projected attendance
-    # Temporary calculation.
-    # We will improve this later using attendance_records.
-    projected_attendance = max(
-        0.0,
-        attendance_before - (number_of_days * 1.0),
+    attendance_before = attendance_summary["attendance_percentage"]
+
+    # 8. Calculate projected attendance using the same source
+    # of truth instead of subtracting an arbitrary percentage per day.
+    projected_attendance = calculate_projected_attendance(
+        classes_held=attendance_summary["classes_held"],
+        classes_attended=attendance_summary["classes_attended"],
+        leave_days=number_of_days,
     )
 
     # 9. Create leave request
@@ -140,11 +182,61 @@ def create_leave(
         projected_attendance=projected_attendance,
     )
 
-    db.add(new_leave)
-    db.commit()
-    db.refresh(new_leave)
+    # ---------------------------------------------------------
+    # TRANSACTION-SAFE LEAVE + AI CREATION
+    # ---------------------------------------------------------
+    # Keep the leave request and its AI analysis in one database
+    # transaction. If AI generation or database persistence fails,
+    # rollback everything so we never leave an incomplete request.
+    try:
+        db.add(new_leave)
+
+        # Flush assigns leave_id without committing the transaction.
+        # This allows AIAnalysis.leave_id to reference the new leave.
+        db.flush()
+
+        ai_result = analyze_leave(
+            reason=new_leave.reason,
+            leave_type_name=leave_type.type_name,
+            number_of_days=new_leave.number_of_days,
+            attendance_before=new_leave.attendance_before,
+            projected_attendance=new_leave.projected_attendance,
+        )
+
+        ai_analysis = AIAnalysis(
+            leave_id=new_leave.leave_id,
+            model_name="CampusLeave AI Rule Engine v1",
+            reason_category=ai_result.reason_category,
+            urgency_score=ai_result.urgency_score,
+            risk_score=ai_result.risk_score,
+            attendance_risk=ai_result.attendance_risk,
+            policy_compliance=ai_result.policy_compliance,
+            recommendation=ai_result.recommendation,
+            confidence=ai_result.confidence,
+            explanation=ai_result.explanation,
+            created_at=datetime.now(),
+        )
+
+        db.add(ai_analysis)
+
+        # One commit persists both LeaveRequest and AIAnalysis.
+        db.commit()
+        db.refresh(new_leave)
+
+    except Exception:
+        # Any AI/database failure rolls back the complete operation.
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Leave request could not be completed because "
+                "AI analysis failed. No leave request was saved."
+            ),
+        )
 
     return new_leave
+
 
 
 # ============================================================
@@ -212,6 +304,12 @@ def get_my_leaves(
 # IMPORTANT: THIS MUST COME BEFORE /{leave_id}
 # ============================================================
 
+# ============================================================
+# GET PENDING LEAVES
+# Includes AI analysis for faculty/management review
+# IMPORTANT: THIS MUST COME BEFORE /{leave_id}
+# ============================================================
+
 @router.get(
     "/pending",
 )
@@ -227,6 +325,7 @@ def get_pending_leaves(
             LeaveType,
             StudentProfile,
             User,
+            AIAnalysis,
         )
         .join(
             LeaveType,
@@ -239,6 +338,10 @@ def get_pending_leaves(
         .join(
             User,
             StudentProfile.user_id == User.user_id,
+        )
+        .outerjoin(
+            AIAnalysis,
+            LeaveRequest.leave_id == AIAnalysis.leave_id,
         )
         .filter(
             LeaveRequest.status == "PENDING"
@@ -255,18 +358,55 @@ def get_pending_leaves(
             "student_id": student.student_id,
             "student_name": student_user.full_name,
             "student_email": student_user.email,
+
             "leave_type": leave_type.type_name,
             "start_date": leave.start_date,
             "end_date": leave.end_date,
             "number_of_days": leave.number_of_days,
             "reason": leave.reason,
             "status": leave.status,
-            "attendance_before": leave.attendance_before,
-            "projected_attendance": leave.projected_attendance,
             "submitted_at": leave.submitted_at,
+
+            "attendance": {
+                "before": leave.attendance_before,
+                "projected": leave.projected_attendance,
+                "change": (
+                    round(
+                        float(leave.projected_attendance or 0)
+                        - float(leave.attendance_before or 0),
+                        2,
+                    )
+                    if leave.attendance_before is not None
+                    and leave.projected_attendance is not None
+                    else None
+                ),
+            },
+
+            "ai_analysis": (
+                {
+                    "analysis_id": ai_analysis.analysis_id,
+                    "model_name": ai_analysis.model_name,
+                    "reason_category": ai_analysis.reason_category,
+                    "urgency_score": ai_analysis.urgency_score,
+                    "risk_score": ai_analysis.risk_score,
+                    "attendance_risk": ai_analysis.attendance_risk,
+                    "policy_compliance": ai_analysis.policy_compliance,
+                    "recommendation": ai_analysis.recommendation,
+                    "confidence": ai_analysis.confidence,
+                    "explanation": ai_analysis.explanation,
+                    "created_at": ai_analysis.created_at,
+                }
+                if ai_analysis
+                else None
+            ),
         }
-        for leave, leave_type, student, student_user
-        in pending_leaves
+        for (
+            leave,
+            leave_type,
+            student,
+            student_user,
+            ai_analysis,
+        ) in pending_leaves
     ]
 
 
