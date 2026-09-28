@@ -7,6 +7,7 @@ from backend.app.services.attendance_service import get_student_attendance_summa
 from backend.app.models import (
     AIAnalysis,
     AuditLog,
+    Department,
     LeaveRequest,
     Notification,
     StudentProfile,
@@ -39,13 +40,11 @@ def get_student_dashboard(
         }
 
     # Attendance records are the single source of truth.
-    # Do not use StudentProfile.total_attendance here because that
-    # field may be a stale cached value.
+    # StudentProfile.total_attendance can be a stale cached value.
     attendance_summary = get_student_attendance_summary(
         db,
         student.student_id,
     )
-
     current_attendance = attendance_summary["attendance_percentage"]
 
     # Get all leave requests
@@ -352,52 +351,81 @@ def get_management_dashboard(
 
     # ---------------------------------------------------------
     # ATTENDANCE OVERVIEW
+    # Attendance records are the same source used by the
+    # student Attendance page and leave creation flow.
     # ---------------------------------------------------------
 
     students = (
-        db.query(StudentProfile)
+        db.query(StudentProfile, User)
+        .join(
+            User,
+            StudentProfile.user_id == User.user_id,
+        )
         .all()
     )
 
-    # Attendance records are the single source of truth for
-    # management analytics as well.
-    student_attendance = [
-        (
-            student,
-            get_student_attendance_summary(
-                db,
-                student.student_id,
-            )["attendance_percentage"],
-        )
-        for student in students
-    ]
+    attendance_values = []
+    low_attendance_students = []
 
-    if student_attendance:
-        average_attendance = round(
-            sum(
-                attendance
-                for _, attendance in student_attendance
-            ) / len(student_attendance),
-            2,
+    for student, student_user in students:
+        attendance = get_student_attendance_summary(
+            db,
+            student.student_id,
         )
-    else:
-        average_attendance = 0.0
 
-    low_attendance_students = [
-        {
-            "student_id": student.student_id,
-            "user_id": student.user_id,
-            "attendance": attendance,
-        }
-        for student, attendance in student_attendance
-        if attendance < 75
-    ]
+        percentage = attendance["attendance_percentage"]
+        attendance_values.append(percentage)
+
+        if percentage < 75:
+            low_attendance_students.append(
+                {
+                    "student_id": student.student_id,
+                    "user_id": student.user_id,
+                    "student_name": student_user.full_name,
+                    "registration_number": student_user.registration_number,
+                    "attendance": percentage,
+                    "classes_held": attendance["classes_held"],
+                    "classes_attended": attendance["classes_attended"],
+                    "classes_absent": attendance["classes_absent"],
+                }
+            )
+
+    average_attendance = (
+        round(sum(attendance_values) / len(attendance_values), 2)
+        if attendance_values
+        else 0.0
+    )
+
+    low_attendance_students.sort(
+        key=lambda item: item["attendance"]
+    )
 
     # ---------------------------------------------------------
     # DEPARTMENT-WISE LEAVE STATISTICS
+    # Include all seeded departments, even when their current
+    # leave count is zero.
     # ---------------------------------------------------------
 
-    department_stats = {}
+    departments = (
+        db.query(Department)
+        .order_by(Department.department_id.asc())
+        .all()
+    )
+
+    department_stats = {
+        department.department_id: {
+            "department_id": department.department_id,
+            "department_code": department.department_code,
+            "department_name": department.department_name,
+            "hod_name": department.hod_name,
+            "total_leaves": 0,
+            "pending": 0,
+            "approved": 0,
+            "rejected": 0,
+            "cancelled": 0,
+        }
+        for department in departments
+    }
 
     leave_records = (
         db.query(
@@ -422,6 +450,9 @@ def get_management_dashboard(
         if department_id not in department_stats:
             department_stats[department_id] = {
                 "department_id": department_id,
+                "department_code": "UNASSIGNED",
+                "department_name": "Unassigned",
+                "hod_name": None,
                 "total_leaves": 0,
                 "pending": 0,
                 "approved": 0,
@@ -430,18 +461,14 @@ def get_management_dashboard(
             }
 
         stats = department_stats[department_id]
-
         stats["total_leaves"] += 1
 
         if leave.status == "PENDING":
             stats["pending"] += 1
-
         elif leave.status == "APPROVED":
             stats["approved"] += 1
-
         elif leave.status == "REJECTED":
             stats["rejected"] += 1
-
         elif leave.status == "CANCELLED":
             stats["cancelled"] += 1
 

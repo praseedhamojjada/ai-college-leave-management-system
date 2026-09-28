@@ -26,6 +26,7 @@ import { useMemo, useState } from "react";
 import ApplyLeave from "./ApplyLeave";
 import MyLeaves from "./MyLeaves";
 import Attendance from "./Attendance";
+import AIInsights from "./AIInsights";
 import Notifications from "./Notifications";
 
 function StudentDashboard({
@@ -217,6 +218,15 @@ function StudentDashboard({
   if (activeSection === "Attendance") {
     return (
       <Attendance
+        user={user}
+        onBack={() => setActiveSection("Dashboard")}
+      />
+    );
+  }
+
+  if (activeSection === "AI Insights") {
+    return (
+      <AIInsights
         user={user}
         onBack={() => setActiveSection("Dashboard")}
       />

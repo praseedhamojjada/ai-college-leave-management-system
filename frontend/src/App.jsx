@@ -3,6 +3,7 @@ import Login from "./pages/Login";
 import StudentDashboard from "./pages/StudentDashboard";
 import ApplyLeave from "./pages/ApplyLeave";
 import FacultyDashboard from "./pages/FacultyDashboard";
+import ManagementDashboard from "./pages/ManagementDashboard";
 import api from "./api/api";
 
 function App() {
@@ -96,13 +97,18 @@ function App() {
     );
   }
 
-  if (
-    user.role === "FACULTY" ||
-    user.role === "HOD" ||
-    user.role === "ADMIN"
-  ) {
+  if (user.role === "FACULTY") {
     return (
       <FacultyDashboard
+        user={user}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  if (user.role === "HOD" || user.role === "ADMIN") {
+    return (
+      <ManagementDashboard
         user={user}
         onLogout={handleLogout}
       />
@@ -115,9 +121,11 @@ function App() {
         <h1 className="text-2xl font-bold text-slate-900">
           Dashboard unavailable
         </h1>
+
         <p className="mt-3 text-slate-500">
           Your account role is not configured for a dashboard yet.
         </p>
+
         <button
           type="button"
           onClick={handleLogout}
