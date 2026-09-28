@@ -9,7 +9,11 @@ class LeaveCreate(BaseModel):
     end_date: date
     reason: str = Field(min_length=10, max_length=2000)
 
-
+class LeaveReject(BaseModel):
+    reason: str = Field(
+        min_length=5,
+        max_length=1000
+    )
 class LeaveResponse(BaseModel):
     leave_id: int
     student_id: int

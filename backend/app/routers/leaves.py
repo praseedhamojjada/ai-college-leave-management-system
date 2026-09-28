@@ -1,20 +1,9 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from datetime import datetime
 
 from backend.app.core.roles import require_role
 from backend.app.database import get_db
-from backend.app.models import (
-    LeaveRequest,
-    LeaveType,
-    StudentProfile,
-    User,
-)
-from backend.app.schemas.leave import (
-    LeaveCreate,
-    LeaveResponse,
-    MyLeaveResponse,
-)
 from backend.app.models import (
     ApprovalHistory,
     AuditLog,
@@ -24,6 +13,13 @@ from backend.app.models import (
     StudentProfile,
     User,
 )
+from backend.app.schemas.leave import (
+    LeaveCreate,
+    LeaveReject,
+    LeaveResponse,
+    MyLeaveResponse,
+)
+
 
 router = APIRouter(
     prefix="/api/leaves",
@@ -375,6 +371,110 @@ def approve_leave(
         "reviewed_at": leave.reviewed_at,
     }
 
+# REJECT LEAVE
+@router.put(
+    "/{leave_id}/reject",
+)
+def reject_leave(
+    leave_id: int,
+    leave_data: LeaveReject,
+    current_user: User = Depends(
+        require_role("FACULTY", "HOD", "ADMIN")
+    ),
+    db: Session = Depends(get_db),
+):
+    leave = (
+        db.query(LeaveRequest)
+        .filter(LeaveRequest.leave_id == leave_id)
+        .first()
+    )
+
+    if not leave:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Leave request not found",
+        )
+
+    if leave.status != "PENDING":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Only pending leave requests can be rejected. "
+                f"Current status: {leave.status}"
+            ),
+        )
+
+    # Update leave request
+    leave.status = "REJECTED"
+    leave.reviewed_by = current_user.user_id
+    leave.reviewed_at = datetime.utcnow()
+    leave.rejection_reason = leave_data.reason
+
+    # Approval history
+    approval = ApprovalHistory(
+        leave_id=leave.leave_id,
+        reviewer_id=current_user.user_id,
+        reviewer_role=current_user.role,
+        action="REJECTED",
+        comments=leave_data.reason,
+    )
+
+    db.add(approval)
+
+    # Find student
+    student = (
+        db.query(StudentProfile)
+        .filter(
+            StudentProfile.student_id == leave.student_id
+        )
+        .first()
+    )
+
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Student profile not found",
+        )
+
+    # Notification
+    notification = Notification(
+        user_id=student.user_id,
+        leave_id=leave.leave_id,
+        notification_type="LEAVE_REJECTED",
+        title="Leave Request Rejected",
+        message=(
+            f"Your leave request from "
+            f"{leave.start_date} to {leave.end_date} "
+            f"has been rejected by {current_user.full_name}. "
+            f"Reason: {leave_data.reason}"
+        ),
+    )
+
+    db.add(notification)
+
+    # Audit log
+    audit = AuditLog(
+        user_id=current_user.user_id,
+        action="REJECT_LEAVE",
+        entity_type="LEAVE_REQUEST",
+        entity_id=leave.leave_id,
+        old_value="PENDING",
+        new_value="REJECTED",
+    )
+
+    db.add(audit)
+
+    db.commit()
+    db.refresh(leave)
+
+    return {
+        "message": "Leave request rejected successfully",
+        "leave_id": leave.leave_id,
+        "status": leave.status,
+        "reviewed_by": current_user.full_name,
+        "reviewed_at": leave.reviewed_at,
+        "rejection_reason": leave.rejection_reason,
+    }
 # ============================================================
 # GET SINGLE LEAVE
 # IMPORTANT: KEEP THIS AFTER /pending
